@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: multibeam-backend
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+      - UPLOAD_DIR=/data/jobs
+      - MAX_FILE_MB=50
+      - FRONTEND_ORIGIN=http://localhost:3000
+      - JOB_TTL_MINUTES=15
+      - CLEANUP_INTERVAL_MINUTES=5
+      - MAX_CONCURRENT_JOBS=1
+      - COMMAND_TIMEOUT_MS=600000
+    volumes:
+      - jobs-data:/data/jobs
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:4000/api/v1
+    container_name: multibeam-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  jobs-data:
