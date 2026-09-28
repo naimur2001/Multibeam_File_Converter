@@ -174,7 +174,7 @@ const extractAndNormalizeSoundings = (inputPath, normalizedXyzPath) => {
 
     writeStream.on("error", (error) => { finish(error); });
 
-    // NO header written here — only inside rl.on("line") below
+    // rl on
 
     rl.on("line", (line) => {
       const trimmed = line.trim();
@@ -268,7 +268,7 @@ const validateOutputFile = async (outputPath) => {
 };
 
 /**
- * User-friendly error messages.
+ * error messages.
  */
 const friendlyErrorMessage = (stage, error) => {
   const message = error.message || String(error);
