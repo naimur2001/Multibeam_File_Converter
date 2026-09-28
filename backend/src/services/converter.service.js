@@ -8,36 +8,17 @@ const jobService = require("./job.service");
 const processService = require("./process.service");
 const env = require("../config/env");
 
-/**
- * Very simple in-memory job queue.
- *
- * For this assessment, this is enough.
- * For production, you could replace this with Redis + BullMQ.
- */
 const queue = [];
 let activeJobs = 0;
 
-/**
- * Add a job to the conversion queue.
- */
 const start = (jobId) => {
   queue.push(jobId);
   setImmediate(processQueue);
 };
 
-/**
- * Process queued jobs.
- *
- * We limit concurrency using env.maxConcurrentJobs.
- */
 const processQueue = async () => {
-  if (activeJobs >= env.maxConcurrentJobs) {
-    return;
-  }
-
-  if (queue.length === 0) {
-    return;
-  }
+  if (activeJobs >= env.maxConcurrentJobs) return;
+  if (queue.length === 0) return;
 
   const jobId = queue.shift();
   activeJobs += 1;
@@ -60,16 +41,11 @@ const runConversion = async (jobId) => {
 
   try {
     const job = jobService.getJob(jobId);
-
-    if (!job) {
-      throw new Error("Job not found");
-    }
+    if (!job) throw new Error("Job not found");
 
     const jobDir = path.dirname(job.inputPath);
 
-    /**
-     * Step 1: Validate input file using mbinfo.
-     */
+    // Step 1: Validate
     currentStage = "validating";
     jobService.updateJob(jobId, {
       status: "processing",
@@ -84,10 +60,8 @@ const runConversion = async (jobId) => {
       timeoutMs: 60000,
     });
 
-    /**
-     * Step 2: Extract soundings using mblist directly from the .all file.
-     * (We skip mbpreprocess as it is a wrapper script that fails in headless Node environments).
-     */
+    // Step 2: Extract soundings directly from .all file
+    // Skip mbpreprocess — it fails silently in headless Docker containers
     currentStage = "extracting";
     jobService.updateJob(jobId, {
       status: "processing",
@@ -96,20 +70,14 @@ const runConversion = async (jobId) => {
     });
 
     const normalizedXyzPath = path.join(jobDir, "normalized.xyz");
-
     const summary = await extractAndNormalizeSoundings(
-      job.inputPath, // <--- CHANGED: Passing the original .all file here!
+      job.inputPath,
       normalizedXyzPath
     );
 
-    jobService.updateJob(jobId, {
-      normalizedXyzPath,
-      summary,
-    });
+    jobService.updateJob(jobId, { normalizedXyzPath, summary });
 
-    /**
-     * Step 3: Convert normalized XYZ file to LAS using PDAL.
-     */
+    // Step 3: Convert to LAS
     currentStage = "converting";
     jobService.updateJob(jobId, {
       status: "processing",
@@ -121,9 +89,7 @@ const runConversion = async (jobId) => {
     await createLasWithPdal(normalizedXyzPath, outputPath, jobDir);
     await validateOutputFile(outputPath);
 
-    /**
-     * Done.
-     */
+    // Done
     jobService.updateJob(jobId, {
       status: "completed",
       stage: "completed",
@@ -143,54 +109,15 @@ const runConversion = async (jobId) => {
 };
 
 /**
- * Find the generated .mb59 file inside the job directory.
+ * Run mblist and normalize output.
+ * Uses -OXYZ only (3 columns). No intensity for now.
+ * Header is written exactly once inside the line handler.
  */
-const findMb59File = async (jobDir) => {
-  const files = await fsp.readdir(jobDir);
-
-  const mb59File = files.find((file) =>
-    file.toLowerCase().endsWith(".mb59")
-  );
-
-  if (!mb59File) {
-    throw new Error(
-      "Preprocessing did not produce an .mb59 file. The input file may be invalid or unsupported."
-    );
-  }
-
-  return path.join(jobDir, mb59File);
-};
-
-/**
- * Run mblist and normalize the output.
- *
- * mblist command:
- *
- * mblist -I input.mb59 -MA -OXYZ
- *
- * Important:
- *
- * -OXYZ outputs longitude, latitude, depth.
- * Uppercase Z usually means depth positive downward.
- *
- * LAS normally expects elevation.
- * For bathymetry, we commonly store elevation as negative depth.
- *
- * So this function does:
- *
- * elevation = -depth
- */
-const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
+const extractAndNormalizeSoundings = (inputPath, normalizedXyzPath) => {
   return new Promise((resolve, reject) => {
-    const child = spawn("mblist", [
-      "-I",
-      mb59Path,
-      "-MA",
-      "-OXYBI",  // X=lon, Y=lat, B=backscatter, I=intensity (if available)
-    ]);
+    const child = spawn("mblist", ["-I", inputPath, "-MA", "-OXYZ"]);
 
     const writeStream = fs.createWriteStream(normalizedXyzPath);
-
     const rl = readline.createInterface({
       input: child.stdout,
       crlfDelay: Infinity,
@@ -199,84 +126,45 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
     let stderr = "";
     let exitCode = null;
     let finished = false;
-
     let pointCount = 0;
     let minDepth = null;
     let maxDepth = null;
+    let headerWritten = false;
 
     const finish = (error, result) => {
-      if (finished) {
-        return;
-      }
-
+      if (finished) return;
       finished = true;
-
-      try {
-        rl.close();
-      } catch (closeError) {
-        // Ignore.
-      }
-
-      try {
-        writeStream.end();
-      } catch (endError) {
-        // Ignore.
-      }
-
-      if (error) {
-        reject(error);
-        return;
-      }
-
+      try { rl.close(); } catch (e) {}
+      try { writeStream.end(); } catch (e) {}
+      if (error) { reject(error); return; }
       resolve(result);
     };
 
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
+    child.stderr.on("data", (data) => { stderr += data.toString(); });
 
     child.on("error", (error) => {
       if (error.code === "ENOENT") {
-        finish(
-          new Error(
-            "Required command not found: mblist. Is MB-System installed?"
-          )
-        );
+        finish(new Error("The mblist command failed to execute."));
         return;
       }
-
       finish(error);
     });
 
     child.on("close", (code) => {
       exitCode = code;
-
       if (code !== 0) {
-        finish(
-          new Error(
-            stderr.trim() || `mblist exited with code ${code}`
-          )
-        );
+        finish(new Error(stderr.trim() || `mblist exited with code ${code}`));
         return;
       }
-
       writeStream.end();
     });
 
     writeStream.on("finish", () => {
-      if (exitCode !== 0) {
-        return;
-      }
-
+      if (exitCode !== 0) return;
       if (pointCount === 0) {
-        finish(
-          new Error(
-            "No soundings were extracted from the input file."
-          )
-        );
+        finish(new Error("No soundings were extracted from the input file."));
         return;
       }
-
       finish(null, {
         pointCount,
         minDepth: minDepth === null ? 0 : minDepth,
@@ -284,16 +172,11 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
       });
     });
 
-    writeStream.on("error", (error) => {
-      finish(error);
-    });
+    writeStream.on("error", (error) => { finish(error); });
 
-    /**
-     * Write CSV header for PDAL.
-     */
-    writeStream.write("X,Y,Z\n");
+    // NO header written here — only inside rl.on("line") below
 
-        rl.on("line", (line) => {
+    rl.on("line", (line) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) return;
 
@@ -304,17 +187,6 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
       const latitude = Number(parts[1]);
       const depth = Number(parts[2]);
 
-     depth, intensity;
-      
-      if (parts.length >= 4) {
-        depth = Number(parts[2]);
-        intensity = Number(parts[3]);
-      } else {
-        depth = Number(parts[2]);
-        intensity = 0;
-      }
-
-      // Skip truly invalid navigation: both coords exactly 0 OR any NaN
       if (
         !Number.isFinite(longitude) ||
         !Number.isFinite(latitude) ||
@@ -323,31 +195,31 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
         return;
       }
 
-      // Only filter 0,0 if depth is also 0 (truly bad nav, not valid equator/prime meridian)
+      // Only filter 0,0 if depth is also 0
       if (longitude === 0 && latitude === 0 && depth === 0) {
         return;
       }
 
-      pointCount += 1;
+      // Write header EXACTLY ONCE before first valid point
+      if (!headerWritten) {
+        writeStream.write("X,Y,Z\n");
+        headerWritten = true;
+      }
 
+      pointCount += 1;
       if (minDepth === null || depth < minDepth) minDepth = depth;
       if (maxDepth === null || depth > maxDepth) maxDepth = depth;
 
       const elevation = -depth;
-         writeStream.write(`${longitude},${latitude},${elevation},${intensity}\n`);
+      writeStream.write(`${longitude},${latitude},${elevation}\n`);
     });
-
   });
 };
 
 /**
- * Convert normalized XYZ file to LAS using PDAL.
+ * Convert normalized XYZ to LAS using PDAL.
  */
-const createLasWithPdal = async (
-  normalizedXyzPath,
-  outputPath,
-  jobDir
-) => {
+const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
   const pipelinePath = path.join(jobDir, "pipeline.json");
 
   const pipeline = {
@@ -355,14 +227,14 @@ const createLasWithPdal = async (
       {
         type: "readers.text",
         filename: normalizedXyzPath,
-        header: "X,Y,Z,Intensity",
+        header: "X,Y,Z",
         skip: 1,
       },
       {
         type: "writers.las",
         filename: outputPath,
-        a_srs: "EPSG:4326+5773", // WGS84 horizontal + EGM96 vertical geoid
-        scale_x: 0.0000001,       // KEEP degree scale — do NOT change to 0.01
+        a_srs: "EPSG:4326+5773",
+        scale_x: 0.0000001,
         scale_y: 0.0000001,
         scale_z: 0.01,
         offset_x: 0,
@@ -372,18 +244,12 @@ const createLasWithPdal = async (
     ],
   };
 
-  await fsp.writeFile(
-    pipelinePath,
-    JSON.stringify(pipeline, null, 2),
-    "utf8"
-  );
+  await fsp.writeFile(pipelinePath, JSON.stringify(pipeline, null, 2), "utf8");
 
   await processService.runCommand({
     command: "pdal",
     args: ["pipeline", pipelinePath],
-    options: {
-      cwd: jobDir,
-    },
+    options: { cwd: jobDir },
     timeoutMs: env.commandTimeoutMs,
   });
 };
@@ -394,23 +260,15 @@ const createLasWithPdal = async (
 const validateOutputFile = async (outputPath) => {
   try {
     const stats = await fsp.stat(outputPath);
-
-    if (!stats.isFile()) {
-      throw new Error("Output LAS path is not a file");
-    }
-
-    if (stats.size === 0) {
-      throw new Error("Output LAS file is empty");
-    }
+    if (!stats.isFile()) throw new Error("Output LAS path is not a file");
+    if (stats.size === 0) throw new Error("Output LAS file is empty");
   } catch (error) {
-    throw new Error(
-      "LAS output file could not be validated. Conversion may have failed."
-    );
+    throw new Error("LAS output file could not be validated. Conversion may have failed.");
   }
 };
 
 /**
- * Convert technical errors into user-friendly messages.
+ * User-friendly error messages.
  */
 const friendlyErrorMessage = (stage, error) => {
   const message = error.message || String(error);
@@ -422,21 +280,15 @@ const friendlyErrorMessage = (stage, error) => {
   switch (stage) {
     case "validating":
       return "The uploaded file could not be read. Please upload a valid Kongsberg .all file.";
-
     case "preprocessing":
       return "The file could not be preprocessed. It may be corrupt or unsupported.";
-
     case "extracting":
       return "Soundings could not be extracted from the file.";
-
     case "converting":
       return "The extracted points could not be converted to LAS format.";
-
     default:
       return "Conversion failed.";
   }
 };
 
-module.exports = {
-  start,
-};
+module.exports = { start };
