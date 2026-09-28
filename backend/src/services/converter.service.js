@@ -184,9 +184,9 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
   return new Promise((resolve, reject) => {
     const child = spawn("mblist", [
       "-I",
-     mb59Path,
-       "-MA",
-       "-OXYBI",
+      mb59Path,
+      "-MA",
+      "-OXYBI",  // X=lon, Y=lat, B=backscatter, I=intensity (if available)
     ]);
 
     const writeStream = fs.createWriteStream(normalizedXyzPath);
@@ -293,38 +293,28 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
      */
     writeStream.write("X,Y,Z\n");
 
-    rl.on("line", (line) => {
+        rl.on("line", (line) => {
       const trimmed = line.trim();
-
-      if (!trimmed) {
-        return;
-      }
-
-      /**
-       * Skip comments or unexpected header lines.
-       */
-      if (trimmed.startsWith("#")) {
-        return;
-      }
+      if (!trimmed || trimmed.startsWith("#")) return;
 
       const parts = trimmed.split(/[\s,;]+/);
-
-      if (parts.length < 3) {
-        return;
-      }
+      if (parts.length < 3) return;
 
       const longitude = Number(parts[0]);
       const latitude = Number(parts[1]);
       const depth = Number(parts[2]);
 
-
-      // Remove points with bad navigation (0,0)
-      if (longitude === 0 && latitude === 0) {
-        return; 
+     depth, intensity;
+      
+      if (parts.length >= 4) {
+        depth = Number(parts[2]);
+        intensity = Number(parts[3]);
+      } else {
+        depth = Number(parts[2]);
+        intensity = 0;
       }
 
-
-
+      // Skip truly invalid navigation: both coords exactly 0 OR any NaN
       if (
         !Number.isFinite(longitude) ||
         !Number.isFinite(latitude) ||
@@ -333,23 +323,20 @@ const extractAndNormalizeSoundings = (mb59Path, normalizedXyzPath) => {
         return;
       }
 
+      // Only filter 0,0 if depth is also 0 (truly bad nav, not valid equator/prime meridian)
+      if (longitude === 0 && latitude === 0 && depth === 0) {
+        return;
+      }
+
       pointCount += 1;
 
-      if (minDepth === null || depth < minDepth) {
-        minDepth = depth;
-      }
+      if (minDepth === null || depth < minDepth) minDepth = depth;
+      if (maxDepth === null || depth > maxDepth) maxDepth = depth;
 
-      if (maxDepth === null || depth > maxDepth) {
-        maxDepth = depth;
-      }
-
-      /**
-       * Convert positive-down depth to elevation.
-       */
       const elevation = -depth;
-
-      writeStream.write(`${longitude},${latitude},${elevation}\n`);
+         writeStream.write(`${longitude},${latitude},${elevation},${intensity}\n`);
     });
+
   });
 };
 
@@ -368,33 +355,19 @@ const createLasWithPdal = async (
       {
         type: "readers.text",
         filename: normalizedXyzPath,
-        header: "X,Y,Z,Intensity",// Assuming Intensity is optional; adjust as needed
+        header: "X,Y,Z,Intensity",
         skip: 1,
       },
-
-      
-      {
-        type: "filters.reprojection",
-        in_srs: "EPSG:4326",
-        out_srs: "EPSG:32645" // UTM Zone 45N
-      },
-
-
-
-
       {
         type: "writers.las",
-        // EPSG:4326 (Horizontal) + 5773 (EGM96 Vertical Geoid)
-        a_srs: "EPSG:4326+5773", 
         filename: outputPath,
-        a_srs: "EPSG:4326",
-        scale_x: 0.0000001,
+        a_srs: "EPSG:4326+5773", // WGS84 horizontal + EGM96 vertical geoid
+        scale_x: 0.0000001,       // KEEP degree scale — do NOT change to 0.01
         scale_y: 0.0000001,
         scale_z: 0.01,
         offset_x: 0,
         offset_y: 0,
         offset_z: 0,
-        extra_dims: "Intensity=uint16", // Assuming Intensity is optional; adjust as needed
       },
     ],
   };
