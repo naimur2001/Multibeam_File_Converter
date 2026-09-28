@@ -1,3 +1,13 @@
+## 📦 Quick Start for Evaluators
+
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running.
+
+1. Unzip the project and open a terminal in the root directory.
+2. Run the following command to build the images and start the servers:
+   ```bash
+   docker compose up --build
+
+   
 # ⚙️ Backend Service
 
 Node.js + Express API that orchestrates the MB-System and PDAL conversion pipeline.
