@@ -6,7 +6,7 @@ import { createJob, getJob, getDownloadUrl } from "../lib/api";
 const STAGES = [
   { key: "received", label: "File received" },
   { key: "validating", label: "Validating .all file" },
-  { key: "preprocessing", label: "Preprocessing sonar data" },
+  // { key: "preprocessing", label: "Preprocessing sonar data" },
   { key: "extracting", label: "Extracting depth points" },
   { key: "converting", label: "Converting to LAS" },
   { key: "completed", label: "Completed" },
@@ -80,7 +80,7 @@ const styles = `
 .mb-num { font-variant-numeric: tabular-nums; }
 .mb-contours { opacity: .09; }
 
-.mb-drop:focus-visible, .mb-btn:focus-visible {
+.mb-drop:focus-visible,/ .mb-btn:focus-visible {
   outline: 2px solid var(--foam);
   outline-offset: 4px;
 }

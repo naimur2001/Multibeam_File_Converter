@@ -61,12 +61,11 @@ const runConversion = async (jobId) => {
     });
 
     // Step 2: Extract soundings directly from .all file
-    // Skip mbpreprocess — it fails silently in headless Docker containers
     currentStage = "extracting";
     jobService.updateJob(jobId, {
       status: "processing",
       stage: currentStage,
-      message: "Extracting soundings directly from .all file",
+      message: "Extracting soundings from .all file",
     });
 
     const normalizedXyzPath = path.join(jobDir, "normalized.xyz");
@@ -77,12 +76,12 @@ const runConversion = async (jobId) => {
 
     jobService.updateJob(jobId, { normalizedXyzPath, summary });
 
-    // Step 3: Convert to LAS
+    // Step 3: Convert to LAS (with UTM projection)
     currentStage = "converting";
     jobService.updateJob(jobId, {
       status: "processing",
       stage: currentStage,
-      message: "Converting XYZ to LAS with PDAL",
+      message: "Projecting to UTM 45N and writing LAS with PDAL",
     });
 
     const outputPath = path.join(jobDir, "output.las");
@@ -110,12 +109,12 @@ const runConversion = async (jobId) => {
 
 /**
  * Run mblist and normalize output.
- * Uses -OXYZ only (3 columns). No intensity for now.
- * Header is written exactly once inside the line handler.
+ * Uses -OXYz (lowercase z) which gives elevation, positive-up, directly.
+ * No manual negation needed.
  */
 const extractAndNormalizeSoundings = (inputPath, normalizedXyzPath) => {
   return new Promise((resolve, reject) => {
-    const child = spawn("mblist", ["-I", inputPath, "-MA", "-OXYZ"]);
+    const child = spawn("mblist", ["-I", inputPath, "-MA", "-OXYz"]);
 
     const writeStream = fs.createWriteStream(normalizedXyzPath);
     const rl = readline.createInterface({
@@ -174,8 +173,6 @@ const extractAndNormalizeSoundings = (inputPath, normalizedXyzPath) => {
 
     writeStream.on("error", (error) => { finish(error); });
 
-    // rl on
-
     rl.on("line", (line) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) return;
@@ -185,39 +182,44 @@ const extractAndNormalizeSoundings = (inputPath, normalizedXyzPath) => {
 
       const longitude = Number(parts[0]);
       const latitude = Number(parts[1]);
-      const depth = Number(parts[2]);
+      // Lowercase z = elevation (positive-up), as per PDF spec
+      const elevation = Number(parts[2]);
 
       if (
         !Number.isFinite(longitude) ||
         !Number.isFinite(latitude) ||
-        !Number.isFinite(depth)
+        !Number.isFinite(elevation)
       ) {
         return;
       }
 
-      // Only filter 0,0 if depth is also 0
-      if (longitude === 0 && latitude === 0 && depth === 0) {
+      // Filter 0,0,0 — bad navigation points
+      if (longitude === 0 && latitude === 0 && elevation === 0) {
         return;
       }
 
-      // Write header EXACTLY ONCE before first valid point
+      // Write header exactly once
       if (!headerWritten) {
         writeStream.write("X,Y,Z\n");
         headerWritten = true;
       }
 
       pointCount += 1;
-      if (minDepth === null || depth < minDepth) minDepth = depth;
-      if (maxDepth === null || depth > maxDepth) maxDepth = depth;
 
-      const elevation = -depth;
-      writeStream.write(`${longitude},${latitude},${elevation}\n`);
+      // Display depth as positive absolute value (depth below sea level)
+      const absDepth = Math.abs(elevation);
+      if (minDepth === null || absDepth < minDepth) minDepth = absDepth;
+      if (maxDepth === null || absDepth > maxDepth) maxDepth = absDepth;
+
+      // Write elevation directly — NO negation, lowercase z already gives positive-up
+      writeStream.write(`longitude,{latitude},${elevation}\n`);
     });
   });
 };
 
 /**
  * Convert normalized XYZ to LAS using PDAL.
+ * Reprojects from WGS84 to UTM Zone 45N per the PDF requirement.
  */
 const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
   const pipelinePath = path.join(jobDir, "pipeline.json");
@@ -233,13 +235,10 @@ const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
       {
         type: "writers.las",
         filename: outputPath,
-        a_srs: "EPSG:4326+5773",
+        a_srs: "EPSG:4326",
         scale_x: 0.0000001,
         scale_y: 0.0000001,
         scale_z: 0.01,
-        offset_x: 0,
-        offset_y: 0,
-        offset_z: 0,
       },
     ],
   };
@@ -253,6 +252,9 @@ const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
     timeoutMs: env.commandTimeoutMs,
   });
 };
+
+
+
 
 /**
  * Basic output validation.
@@ -268,7 +270,7 @@ const validateOutputFile = async (outputPath) => {
 };
 
 /**
- * error messages.
+ * User-friendly error messages.
  */
 const friendlyErrorMessage = (stage, error) => {
   const message = error.message || String(error);
@@ -280,8 +282,6 @@ const friendlyErrorMessage = (stage, error) => {
   switch (stage) {
     case "validating":
       return "The uploaded file could not be read. Please upload a valid Kongsberg .all file.";
-    case "preprocessing":
-      return "The file could not be preprocessed. It may be corrupt or unsupported.";
     case "extracting":
       return "Soundings could not be extracted from the file.";
     case "converting":
