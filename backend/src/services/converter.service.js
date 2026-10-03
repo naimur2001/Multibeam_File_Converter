@@ -220,9 +220,39 @@ const extractAndNormalizeSoundings = (inputPath, normalizedXyzPath) => {
 /**
  * Convert normalized XYZ to LAS using PDAL.
  * Reprojects from WGS84 to UTM Zone 45N per the PDF requirement.
+ * Key changes:
+Auto-detects UTM zone from actual data coordinates
+Uses meter-based scale (0.01) instead of degree-based
+Removes hardcoded offsets so PDAL calculates them correctly
+Logs the detected zone for debugging
  */
 const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
   const pipelinePath = path.join(jobDir, "pipeline.json");
+
+  // Read first few lines to detect approximate longitude for UTM zone calculation
+  const content = await fsp.readFile(normalizedXyzPath, "utf8");
+  const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("X"));
+  
+  let sumLon = 0;
+  let count = 0;
+  for (let i = 0; i < Math.min(lines.length, 100); i++) {
+    const parts = lines[i].split(",");
+    if (parts.length >= 2) {
+      const lon = Number(parts[0]);
+      if (Number.isFinite(lon)) {
+        sumLon += lon;
+        count++;
+      }
+    }
+  }
+  
+  const meanLon = count > 0 ? sumLon / count : 0;
+  
+  // Calculate UTM zone: zone = floor((lon + 180) / 6) + 1
+  const utmZone = Math.floor((meanLon + 180) / 6) + 1;
+  const epsgCode = 32600 + utmZone; // Northern hemisphere
+  
+  console.log(`[PDAL] Mean longitude: ${meanLon.toFixed(4)}°, detected UTM Zone: ${utmZone}N (EPSG:${epsgCode})`);
 
   const pipeline = {
     pipeline: [
@@ -233,12 +263,18 @@ const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
         skip: 1,
       },
       {
+        type: "filters.reprojection",
+        in_srs: "EPSG:4326",
+        out_srs: `EPSG:${epsgCode}`,
+      },
+      {
         type: "writers.las",
         filename: outputPath,
-        a_srs: "EPSG:4326",
-        scale_x: 0.0000001,
-        scale_y: 0.0000001,
+        a_srs: `EPSG:${epsgCode}`,
+        scale_x: 0.01,
+        scale_y: 0.01,
         scale_z: 0.01,
+        // Let PDAL auto-calculate offsets for UTM coordinates
       },
     ],
   };
@@ -252,7 +288,6 @@ const createLasWithPdal = async (normalizedXyzPath, outputPath, jobDir) => {
     timeoutMs: env.commandTimeoutMs,
   });
 };
-
 
 
 
